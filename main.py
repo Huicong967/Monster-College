@@ -2,6 +2,7 @@ import os
 import pygame
 import subprocess
 import sys
+import importlib.util
 import numpy as np
 import tempfile
 from moviepy.video.io.VideoFileClip import VideoFileClip
@@ -303,6 +304,7 @@ def play_video() -> None:
 
 def show_map() -> None:
     """Display the map image fullscreen and wait until the user quits or presses BACKSPACE to return."""
+    global screen, SCREEN_WIDTH, SCREEN_HEIGHT
     MAP_PATH = os.path.join(ASSET_DIR, "map.png")
     if not os.path.exists(MAP_PATH):
         print(f"Missing map image: {MAP_PATH}. Put map.png in the meun&map folder.")
@@ -370,6 +372,8 @@ def show_map() -> None:
     shadow_rect.move_ip(2, 2)
 
     while showing:
+        launch_mini_game = False
+
         mx, my = pygame.mouse.get_pos()
         hovered_robot = robot_rect.collidepoint((mx, my)) if robot_rect is not None else False
         hovered_tiger = tiger_rect.collidepoint((mx, my)) if tiger_rect is not None else False
@@ -397,7 +401,8 @@ def show_map() -> None:
                     pressed_btn = None
             if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 if pressed_btn == "robot" and hovered_robot:
-                    print("Robot button clicked")
+                    # Launch Max Mini Game (smooth: keep this frame on-screen; don't tear down the display).
+                    launch_mini_game = True
                 elif pressed_btn == "tiger" and hovered_tiger:
                     print("Tiger button clicked")
                 elif pressed_btn == "dog" and hovered_dog:
@@ -423,6 +428,35 @@ def show_map() -> None:
         screen.blit(instr_s, instr_rect)
         pygame.display.flip()
         clock.tick(30)
+
+        if launch_mini_game:
+            mini_path = os.path.join(os.path.dirname(__file__), "Max_mini_game", "Max Mini Game.py")
+            if not os.path.exists(mini_path):
+                print("Max Mini Game script not found at", mini_path)
+                continue
+
+            # Run the mini game inside the same Pygame window (no subprocess).
+            try:
+                spec = importlib.util.spec_from_file_location("max_mini_game", mini_path)
+                if spec is None or spec.loader is None:
+                    raise RuntimeError("Unable to load Max Mini Game module")
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+
+                if hasattr(mod, "run"):
+                    mod.run(screen)
+                elif hasattr(mod, "main"):
+                    mod.main()
+                else:
+                    raise RuntimeError("Max Mini Game does not define run() or main()")
+
+                # Clear any queued events from the mini game so the map doesn't instantly react.
+                try:
+                    pygame.event.clear()
+                except Exception:
+                    pass
+            except Exception as e:
+                print("Failed to run Max Mini Game:", e)
 
 
 if __name__ == "__main__":
