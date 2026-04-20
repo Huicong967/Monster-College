@@ -1,4 +1,7 @@
-# Monster School — Competition Day
+git fetch origin
+git checkout main
+git reset --hard origin/main
+bash scripts/fetch_assets.sh# Monster School — Competition Day
 
 Interactive branching video where the audience chooses the story.
 
