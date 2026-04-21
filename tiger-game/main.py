@@ -14,6 +14,12 @@ try:
 except Exception:
     cv2 = None
 
+try:
+    moviepy_pkg = importlib.import_module('moviepy')
+    VideoFileClip = getattr(moviepy_pkg, 'VideoFileClip', None)
+except Exception:
+    VideoFileClip = None
+
 # Simple pygame game:
 import shutil
 
@@ -232,16 +238,29 @@ def find_failed_end_image():
     return None
 
 def find_player_png_frames():
-    """Return list of up to two player PNG paths named like 'tiger*' in assets."""
-    out = []
+    """Return the original two tiger animation PNGs in stable order."""
     if not os.path.isdir(ASSETS_DIR):
-        return out
+        return []
+
+    prefer_names = ['tiger1.png', 'tiger 2.png']
+    found = []
+    for name in prefer_names:
+        p = os.path.join(ASSETS_DIR, name)
+        if os.path.exists(p):
+            found.append(p)
+    if len(found) == 2:
+        return found
+
+    # Fallback: keep only plain tiger frame names, exclude story/end images.
     cand = []
     for fn in os.listdir(ASSETS_DIR):
-        if fn.lower().endswith('.png') and 'tiger' in fn.lower():
-            cand.append(os.path.join(ASSETS_DIR, fn))
+        low = fn.lower()
+        if not low.endswith('.png') or 'tiger' not in low:
+            continue
+        if any(k in low for k in ['win', 'failed', 'fail', 'end', 'choose']):
+            continue
+        cand.append(os.path.join(ASSETS_DIR, fn))
     cand.sort()
-    # take first two if available
     return cand[:2]
 
 def find_image_by_keywords(keywords):
@@ -260,17 +279,65 @@ def find_intro_video():
         return None
     for fn in os.listdir(ASSETS_DIR):
         low = fn.lower()
-        if low.endswith(('.mp4', '.mov', '.avi', '.mkv')) and ('introduce' in low or 'intro' in low or 'tiger' in low):
+        if low.endswith(('.mp4', '.mov', '.avi', '.mkv')) and ('introduce' in low or 'intro' in low):
             return os.path.join(ASSETS_DIR, fn)
     return None
 
-def play_video_fullscreen(screen, clock, video_path):
+def find_video_by_keywords(keywords):
+    if not os.path.isdir(ASSETS_DIR):
+        return None
+    for fn in os.listdir(ASSETS_DIR):
+        low = fn.lower()
+        if not low.endswith(('.mp4', '.mov', '.avi', '.mkv')):
+            continue
+        if all(k in low for k in keywords):
+            return os.path.join(ASSETS_DIR, fn)
+    return None
+
+def find_choice_image():
+    if not os.path.isdir(ASSETS_DIR):
+        return None
+    for fn in os.listdir(ASSETS_DIR):
+        low = fn.lower()
+        if low.endswith('.png') and 'choose' in low:
+            return os.path.join(ASSETS_DIR, fn)
+    return None
+
+def find_image_by_all_keywords(keywords):
+    if not os.path.isdir(ASSETS_DIR):
+        return None
+    for fn in os.listdir(ASSETS_DIR):
+        low = fn.lower()
+        if not low.endswith('.png'):
+            continue
+        if all(k in low for k in keywords):
+            return os.path.join(ASSETS_DIR, fn)
+    return None
+
+def ensure_mixer_ready():
+    if pygame.mixer.get_init() is not None:
+        return True
+    try:
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
+        return pygame.mixer.get_init() is not None
+    except Exception as e:
+        print('MenuLog: pygame mixer init failed:', e)
+        return False
+
+def terminate_all_programs():
+    try:
+        pygame.quit()
+    except Exception:
+        pass
+    raise SystemExit
+
+def play_video_fullscreen(screen, clock, video_path, hold_last_frame=True):
     if not video_path:
         print('MenuLog: Continue clicked but intro video not found.')
-        return
+        return 'finished'
     if cv2 is None:
         print('MenuLog: OpenCV not available, cannot play intro video.')
-        return
+        return 'finished'
 
     cap = cv2.VideoCapture(video_path)
     temp_video_path = None
@@ -298,7 +365,7 @@ def play_video_fullscreen(screen, clock, video_path):
                 os.remove(temp_video_path)
             except Exception:
                 pass
-        return
+        return 'finished'
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not fps or fps <= 1:
@@ -307,6 +374,27 @@ def play_video_fullscreen(screen, clock, video_path):
     scr_w, scr_h = screen.get_size()
     last_frame_surf = None
     last_pos = (0, 0)
+    skip_font = pygame.font.Font(None, 34)
+    skip_text = 'Press TAB to skip this video'
+
+    # cv2 only decodes video frames. Use moviepy + pygame mixer channel to play embedded audio.
+    temp_audio_path = None
+    video_audio_channel = None
+    try:
+        if VideoFileClip is not None and ensure_mixer_ready():
+            clip = VideoFileClip(video_path)
+            if clip.audio is not None:
+                audio_temp = tempfile.NamedTemporaryFile(prefix='video_audio_', suffix='.wav', delete=False)
+                temp_audio_path = audio_temp.name
+                audio_temp.close()
+                clip.audio.write_audiofile(temp_audio_path, codec='pcm_s16le', fps=44100, logger=None)
+                video_audio_sound = pygame.mixer.Sound(temp_audio_path)
+                video_audio_channel = pygame.mixer.find_channel(force=True)
+                if video_audio_channel is not None:
+                    video_audio_channel.play(video_audio_sound)
+            clip.close()
+    except Exception as e:
+        print('MenuLog: failed to play video audio track:', e)
 
     playing = True
     while playing:
@@ -318,7 +406,14 @@ def play_video_fullscreen(screen, clock, video_path):
                         os.remove(temp_video_path)
                     except Exception:
                         pass
-                return
+                terminate_all_programs()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    cap.release()
+                    terminate_all_programs()
+                if event.key == pygame.K_TAB:
+                    playing = False
+                    break
 
         ok, frame = cap.read()
         if not ok:
@@ -338,26 +433,210 @@ def play_video_fullscreen(screen, clock, video_path):
         last_pos = (x, y)
         screen.fill((0, 0, 0))
         screen.blit(frame_surf, (x, y))
+        skip_shadow = skip_font.render(skip_text, True, (0, 0, 0))
+        skip_surf = skip_font.render(skip_text, True, (255, 255, 255))
+        screen.blit(skip_shadow, (18, 18))
+        screen.blit(skip_surf, (16, 16))
         pygame.display.flip()
         clock.tick(max(1, int(1000 / frame_delay)))
 
     cap.release()
+    if video_audio_channel is not None:
+        try:
+            video_audio_channel.stop()
+        except Exception:
+            pass
+    if temp_audio_path and os.path.exists(temp_audio_path):
+        try:
+            os.remove(temp_audio_path)
+        except Exception:
+            pass
     if temp_video_path and os.path.exists(temp_video_path):
         try:
             os.remove(temp_video_path)
         except Exception:
             pass
 
-    # Keep the video end frame on screen and do not return to end menu by user click/ESC.
-    if last_frame_surf is not None:
+    # Optionally keep the video end frame on screen.
+    if hold_last_frame and last_frame_surf is not None:
         while True:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    return
+                    terminate_all_programs()
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        terminate_all_programs()
+                    if event.key == pygame.K_TAB:
+                        return 'skipped'
             screen.fill((0, 0, 0))
             screen.blit(last_frame_surf, last_pos)
+            skip_shadow = skip_font.render(skip_text, True, (0, 0, 0))
+            skip_surf = skip_font.render(skip_text, True, (255, 255, 255))
+            screen.blit(skip_shadow, (18, 18))
+            screen.blit(skip_surf, (16, 16))
             pygame.display.flip()
             clock.tick(FPS)
+    return 'finished'
+
+def show_path_choice_screen(screen, clock, choose_bg_img, green_box_img, left_btn_img, right_btn_img):
+    prompt_text = 'The winged tiger is lost. Please choose a path for it.'
+    prompt_font = pygame.font.Font(None, 40)
+    fallback_btn_font = pygame.font.Font(None, 34)
+
+    # Build bottom panel
+    panel_w = int(SCREEN_WIDTH * 0.84)
+    panel_h = int(SCREEN_HEIGHT * 0.30)
+    if green_box_img:
+        try:
+            panel_surf = pygame.transform.smoothscale(green_box_img, (panel_w, panel_h))
+        except Exception:
+            panel_surf = pygame.transform.scale(green_box_img, (panel_w, panel_h))
+    else:
+        panel_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel_surf.fill((34, 139, 34, 230))
+
+    panel_rect = panel_surf.get_rect(midbottom=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - int(SCREEN_HEIGHT * 0.05)))
+
+    # Build left/right button surfaces
+    btn_w = int(panel_w * 0.24)
+    btn_h = int(btn_w * 0.42)
+
+    def build_btn(image_obj, fallback_text):
+        if image_obj:
+            try:
+                return pygame.transform.smoothscale(image_obj, (btn_w, btn_h))
+            except Exception:
+                return pygame.transform.scale(image_obj, (btn_w, btn_h))
+        s = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
+        s.fill((245, 245, 245, 255))
+        txt = fallback_btn_font.render(fallback_text, True, (30, 30, 30))
+        txt_rect = txt.get_rect(center=(btn_w // 2, btn_h // 2))
+        s.blit(txt, txt_rect)
+        return s
+
+    left_surf = build_btn(left_btn_img, 'left')
+    right_surf = build_btn(right_btn_img, 'right')
+
+    gap = int(panel_w * 0.10)
+    total_btn_w = left_surf.get_width() + right_surf.get_width() + gap
+    left_x = panel_rect.left + (panel_w - total_btn_w) // 2
+    btn_y = panel_rect.top + int(panel_h * 0.58)
+    left_rect = left_surf.get_rect(topleft=(left_x, btn_y))
+    right_rect = right_surf.get_rect(topleft=(left_x + left_surf.get_width() + gap, btn_y))
+
+    text_surf = render_multiline(prompt_text, prompt_font, (0, 0, 0), int(panel_w * 0.82))
+    text_pos = (
+        panel_rect.left + (panel_w - text_surf.get_width()) // 2 + int(panel_w * 0.14),
+        panel_rect.top + int(panel_h * 0.20) + int(panel_h * 0.18),
+    )
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                terminate_all_programs()
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                terminate_all_programs()
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if left_rect.collidepoint(event.pos):
+                    return 'left'
+                if right_rect.collidepoint(event.pos):
+                    return 'right'
+
+        if choose_bg_img:
+            try:
+                bg_full = pygame.transform.smoothscale(choose_bg_img, (SCREEN_WIDTH, SCREEN_HEIGHT))
+            except Exception:
+                bg_full = pygame.transform.scale(choose_bg_img, (SCREEN_WIDTH, SCREEN_HEIGHT))
+            screen.blit(bg_full, (0, 0))
+        else:
+            screen.fill((20, 20, 20))
+
+        screen.blit(panel_surf, panel_rect.topleft)
+        screen.blit(text_surf, text_pos)
+        screen.blit(left_surf, left_rect.topleft)
+        screen.blit(right_surf, right_rect.topleft)
+        pygame.display.flip()
+        clock.tick(FPS)
+
+def show_story_end_screen(screen, clock, end_img, retry_btn_img, menu_btn_img, quit_btn_img):
+    btn_w = int(SCREEN_WIDTH * 0.22 * math.sqrt(0.5))
+    btn_h = int(btn_w * 0.33)
+    center_y = int(SCREEN_HEIGHT * 0.86)
+    gap = int(btn_w * 0.45)
+    total_w = btn_w * 3 + gap * 2
+    left_x = (SCREEN_WIDTH - total_w) // 2
+
+    def build_button(image_obj, x, y):
+        if image_obj:
+            try:
+                s = pygame.transform.smoothscale(image_obj, (btn_w, btn_h))
+            except Exception:
+                s = pygame.transform.scale(image_obj, (btn_w, btn_h))
+        else:
+            s = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
+            s.fill((240, 240, 240, 255))
+        r = s.get_rect(center=(x, y))
+        screen.blit(s, r.topleft)
+        return r
+
+    while True:
+        if end_img:
+            try:
+                end_full = pygame.transform.smoothscale(end_img, (SCREEN_WIDTH, SCREEN_HEIGHT))
+            except Exception:
+                end_full = pygame.transform.scale(end_img, (SCREEN_WIDTH, SCREEN_HEIGHT))
+            screen.blit(end_full, (0, 0))
+        else:
+            screen.fill((15, 15, 15))
+
+        retry_rect = build_button(retry_btn_img, left_x + btn_w // 2, center_y)
+        menu_rect = build_button(menu_btn_img, left_x + gap + btn_w + btn_w // 2, center_y)
+        quit_rect = build_button(quit_btn_img, left_x + 2 * (gap + btn_w) + btn_w // 2, center_y)
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                terminate_all_programs()
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                terminate_all_programs()
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if menu_rect.collidepoint(event.pos):
+                    return 'menu'
+                if retry_rect.collidepoint(event.pos):
+                    return 'retry'
+                if quit_rect.collidepoint(event.pos):
+                    terminate_all_programs()
+        clock.tick(FPS)
+
+def run_tiger_story_flow(screen, clock, intro_video_path, choose_bg_img, green_box_img, left_btn_img, right_btn_img,
+                         tiger_win_video_path, tiger_failed_video_path, tiger_win_end_img, tiger_failed_end_img,
+                         retry_btn_img, menu_btn_img, quit_btn_img):
+    while True:
+        play_video_fullscreen(screen, clock, intro_video_path, hold_last_frame=False)
+        choice = show_path_choice_screen(
+            screen,
+            clock,
+            choose_bg_img,
+            green_box_img,
+            left_btn_img,
+            right_btn_img,
+        )
+
+        if choice == 'left':
+            print('MenuLog: Left selected, play tiger win video.')
+            play_video_fullscreen(screen, clock, tiger_win_video_path, hold_last_frame=False)
+            action = show_story_end_screen(screen, clock, tiger_win_end_img, retry_btn_img, menu_btn_img, quit_btn_img)
+        elif choice == 'right':
+            print('MenuLog: Right selected, play tiger failed video.')
+            play_video_fullscreen(screen, clock, tiger_failed_video_path, hold_last_frame=False)
+            action = show_story_end_screen(screen, clock, tiger_failed_end_img, retry_btn_img, menu_btn_img, quit_btn_img)
+        else:
+            return 'menu'
+
+        if action == 'retry':
+            continue
+        if action == 'menu':
+            return 'menu'
 
 # Game objects
 class Player:
@@ -416,11 +695,7 @@ class Ball:
 # Main
 def main(screen: pygame.Surface | None = None):
     pygame.init()
-    try:
-        if pygame.mixer.get_init() is None:
-            pygame.mixer.init()
-    except Exception:
-        pass
+    ensure_mixer_ready()
     global SCREEN_WIDTH, SCREEN_HEIGHT
     created_display = False
     # Use native fullscreen mode to avoid desktop scaling bars.
@@ -442,6 +717,11 @@ def main(screen: pygame.Surface | None = None):
     retry_btn_img = None
     menu_btn_img = None
     quit_btn_img = None
+    choose_bg_img = None
+    left_btn_img = None
+    right_btn_img = None
+    tiger_win_end_img = None
+    tiger_failed_end_img = None
     green_box_path = os.path.join(ASSETS_DIR, 'green box.png')
     start_btn_path = os.path.join(ASSETS_DIR, 'start.png')
     continue_btn_path = os.path.join(ASSETS_DIR, 'continue.png')
@@ -449,6 +729,13 @@ def main(screen: pygame.Surface | None = None):
     menu_btn_path = os.path.join(ASSETS_DIR, 'Back to the menu.png')
     quit_btn_path = os.path.join(ASSETS_DIR, 'quit.png')
     intro_video_path = find_intro_video()
+    tiger_win_video_path = find_video_by_keywords(['tiger', 'win'])
+    tiger_failed_video_path = find_video_by_keywords(['tiger', 'failed'])
+    tiger_win_end_path = find_image_by_all_keywords(['tiger', 'win', 'end'])
+    tiger_failed_end_path = find_image_by_all_keywords(['tiger', 'failed', 'end'])
+    choose_bg_path = find_choice_image()
+    left_btn_path = find_image_by_keywords(['left'])
+    right_btn_path = find_image_by_keywords(['right'])
     if os.path.exists(green_box_path):
         try:
             green_box_img = pygame.image.load(green_box_path).convert_alpha()
@@ -479,6 +766,31 @@ def main(screen: pygame.Surface | None = None):
             quit_btn_img = pygame.image.load(quit_btn_path).convert_alpha()
         except Exception as e:
             print('Failed to load quit button image', quit_btn_path, e)
+    if choose_bg_path and os.path.exists(choose_bg_path):
+        try:
+            choose_bg_img = pygame.image.load(choose_bg_path).convert_alpha()
+        except Exception as e:
+            print('Failed to load choose background image', choose_bg_path, e)
+    if left_btn_path and os.path.exists(left_btn_path):
+        try:
+            left_btn_img = pygame.image.load(left_btn_path).convert_alpha()
+        except Exception as e:
+            print('Failed to load left button image', left_btn_path, e)
+    if right_btn_path and os.path.exists(right_btn_path):
+        try:
+            right_btn_img = pygame.image.load(right_btn_path).convert_alpha()
+        except Exception as e:
+            print('Failed to load right button image', right_btn_path, e)
+    if tiger_win_end_path and os.path.exists(tiger_win_end_path):
+        try:
+            tiger_win_end_img = pygame.image.load(tiger_win_end_path).convert_alpha()
+        except Exception as e:
+            print('Failed to load tiger win end image', tiger_win_end_path, e)
+    if tiger_failed_end_path and os.path.exists(tiger_failed_end_path):
+        try:
+            tiger_failed_end_img = pygame.image.load(tiger_failed_end_path).convert_alpha()
+        except Exception as e:
+            print('Failed to load tiger failed end image', tiger_failed_end_path, e)
     # Prefer tiger PNG frames (tiger1/tiger2) for transparent player; fallback to GIF
     player_frames = []
     png_paths = find_player_png_frames()
@@ -630,7 +942,7 @@ def main(screen: pygame.Surface | None = None):
                 if created_display:
                     running = False
                 else:
-                    return won
+                    return
             elif event.type == SPAWN_EVENT:
                 # spawn a ball at random y and x beyond right edge
                 if ball_imgs:
@@ -644,7 +956,7 @@ def main(screen: pygame.Surface | None = None):
                     if created_display:
                         running = False
                     else:
-                        return won
+                        return
                 if event.key == pygame.K_UP:
                     move_up = True
                 elif event.key == pygame.K_w:
@@ -689,16 +1001,34 @@ def main(screen: pygame.Surface | None = None):
                     elif menu_rect and menu_rect.collidepoint(event.pos):
                         print('MenuLog: Menu clicked.')
                         # Match Max Mini Game home behavior: return to caller menu immediately.
-                        return won
+                        return
                     elif continue_rect and continue_rect.collidepoint(event.pos):
                         print('MenuLog: Continue clicked, play intro video.')
-                        play_video_fullscreen(screen, clock, intro_video_path)
+                        flow_action = run_tiger_story_flow(
+                            screen,
+                            clock,
+                            intro_video_path,
+                            choose_bg_img,
+                            green_box_img,
+                            left_btn_img,
+                            right_btn_img,
+                            tiger_win_video_path,
+                            tiger_failed_video_path,
+                            tiger_win_end_img,
+                            tiger_failed_end_img,
+                            retry_btn_img,
+                            menu_btn_img,
+                            quit_btn_img,
+                        )
+                        if flow_action != 'retry':
+                            print('MenuLog: Menu clicked.')
+                            return
                     elif quit_rect and quit_rect.collidepoint(event.pos):
                         print('MenuLog: Quit clicked, closing game.')
                         if created_display:
                             running = False
                         else:
-                            return won
+                            return
 
         if show_start_screen:
             if bg_img:
@@ -946,7 +1276,6 @@ def main(screen: pygame.Surface | None = None):
 
     if created_display:
         pygame.quit()
-    return won
 
 
 def run(screen: pygame.Surface | None = None):
