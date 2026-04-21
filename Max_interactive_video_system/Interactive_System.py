@@ -229,7 +229,8 @@ def _choose_option(
     btn_b = pygame.Rect(right_x, center_y - (button_b_h // 2), button_b_w, button_b_h)
 
     font = pygame.font.SysFont(None, max(24, int(fallback_button_h * 0.55)))
-    hint_font = pygame.font.SysFont(None, max(18, int(screen_h * 0.04)))
+    hint_font = pygame.font.SysFont(None, max(26, int(screen_h * 0.06)))
+    hint_font.set_bold(True)
 
     while True:
         mx, my = pygame.mouse.get_pos()
@@ -276,8 +277,8 @@ def _choose_option(
         else:
             draw_btn_fallback(btn_b, "B", hover_b)
 
-        hint = hint_font.render("Choose an option", True, (220, 220, 220))
-        screen.blit(hint, hint.get_rect(center=(screen_w // 2, int(screen_h * 0.55))))
+        hint = hint_font.render("Choose an option", True, (235, 235, 235))
+        screen.blit(hint, hint.get_rect(midtop=(screen_w // 2, int(screen_h * 0.05))))
 
         pygame.display.flip()
         clock.tick(60)
