@@ -320,8 +320,44 @@ def play_video_in_pygame(path: str, show_skip_hint: bool = True) -> bool:
 
 
 def play_intro_sequence() -> None:
-    # Play the single intro video file shipped in menu&map.
-    play_video_in_pygame(VIDEO_PATH, show_skip_hint=True)
+    # Prefer concatenating separate intro files (intro01..intro04) so there
+    # is no load gap between them. Fall back to the single bundled file.
+    intro_dir = os.path.join(ASSET_DIR, "intro_video")
+    intro_files = [os.path.join(intro_dir, f"intro{n:02d}.mp4") for n in range(1, 5)]
+
+    if all(os.path.exists(p) for p in intro_files):
+        clips = []
+        concat = None
+        try:
+            for p in intro_files:
+                clips.append(VideoFileClip(p))
+            concat = concatenate_videoclips(clips, method="compose")
+            play_clip_in_pygame(concat, show_skip_hint=True)
+        except Exception as e:
+            print("Failed to play concatenated intros, falling back:", e)
+            try:
+                if os.path.exists(VIDEO_PATH):
+                    play_video_in_pygame(VIDEO_PATH, show_skip_hint=True)
+            except Exception as e2:
+                print("Fallback playback failed:", e2)
+        finally:
+            try:
+                for c in clips:
+                    c.close()
+            except Exception:
+                pass
+            try:
+                if concat is not None:
+                    concat.close()
+            except Exception:
+                pass
+        return
+
+    # fallback to single bundled video
+    if os.path.exists(VIDEO_PATH):
+        play_video_in_pygame(VIDEO_PATH, show_skip_hint=True)
+    else:
+        print("No intro videos found: expected either menu&map/intro_video/intro01..04.mp4 or", VIDEO_PATH)
 
 
 def play_video() -> None:
