@@ -197,23 +197,21 @@ def main() -> None:
     pygame.quit()
 
 
-def play_video_in_pygame(path: str) -> None:
-    """Play the given video file inside the existing Pygame `screen`.
+def play_clip_in_pygame(clip, allow_skip: bool | None = None) -> str:
+    """Play a MoviePy clip object inside the existing Pygame `screen`.
 
-    This uses MoviePy to decode frames and blits them into the Pygame surface.
-    Playback uses wall-clock timing and frame catch-up to keep A/V in sync.
+    This is the core playback routine used for both single files and
+    concatenated sequences so there are no gaps between clips.
+    Returns one of: "finished", "skipped", "quit".
     """
-    clip = VideoFileClip(path)
     fps = clip.fps if clip.fps and clip.fps > 0 else 30
     frame_interval = 1.0 / float(fps)
 
-    # Prepare optional on-screen instruction (styled like the start screen)
     font = pygame.font.Font(None, 48)
-    skip_allowed = os.path.basename(path).lower() in {
-        "skytoschool.mp4",
-        "monstercollegeintro.mp4",
-        "intro01.mp4",
-    }
+    # By default don't allow skip unless caller requests it.
+    skip_allowed = False
+    if allow_skip is not None:
+        skip_allowed = bool(allow_skip)
     instr_s = None
     shadow = None
     instr_rect = None
@@ -230,7 +228,6 @@ def play_video_in_pygame(path: str) -> None:
     fallback_start_time = None
 
     def _playback_time_s() -> float:
-        """Return current playback time using audio clock when available."""
         if pygame.mixer.get_init():
             try:
                 pos_ms = pygame.mixer.music.get_pos()
@@ -241,11 +238,10 @@ def play_video_in_pygame(path: str) -> None:
         if fallback_start_time is None:
             return 0.0
         return max(0.0, time.perf_counter() - fallback_start_time)
+
     try:
-        # extract and play audio if present
         try:
             if hasattr(clip, "audio") and clip.audio is not None:
-                # Use WAV to avoid MP3 encoder delay and improve A/V sync.
                 tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
                 tmp_name = tmp.name
                 tmp.close()
@@ -265,7 +261,6 @@ def play_video_in_pygame(path: str) -> None:
 
         frame_index = 0
         for frame in clip.iter_frames(fps=fps, dtype="uint8"):
-            # handle quit / escape / tab events while playing
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     try:
@@ -273,13 +268,12 @@ def play_video_in_pygame(path: str) -> None:
                             pygame.mixer.music.stop()
                     except Exception:
                         pass
-                    clip.close()
                     if audio_temp is not None:
                         try:
                             os.remove(audio_temp)
                         except Exception:
                             pass
-                    return
+                    return "quit"
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         try:
@@ -287,28 +281,25 @@ def play_video_in_pygame(path: str) -> None:
                                 pygame.mixer.music.stop()
                         except Exception:
                             pass
-                        clip.close()
                         if audio_temp is not None:
                             try:
                                 os.remove(audio_temp)
                             except Exception:
                                 pass
-                        return
+                        return "quit"
                     if event.key == pygame.K_TAB and skip_allowed:
                         try:
                             if pygame.mixer.get_init():
                                 pygame.mixer.music.stop()
                         except Exception:
                             pass
-                        clip.close()
                         if audio_temp is not None:
                             try:
                                 os.remove(audio_temp)
                             except Exception:
                                 pass
-                        return
+                        return "skipped"
 
-            # Sync using audio clock: drop late frames, wait if video gets ahead.
             playback_time = _playback_time_s()
             expected_index = int(playback_time * fps)
             if frame_index < expected_index - 1:
@@ -319,30 +310,22 @@ def play_video_in_pygame(path: str) -> None:
                 playback_time = _playback_time_s()
                 expected_index = int(playback_time * fps)
 
-            # frame is HxWx3 RGB
             h, w = frame.shape[0], frame.shape[1]
-            # create a surface from the frame bytes
             surf = pygame.image.frombuffer(frame.tobytes(), (w, h), "RGB")
-            # Use faster scaling during video playback to reduce CPU pressure and A/V drift.
             if w != SCREEN_WIDTH or h != SCREEN_HEIGHT:
                 surf = pygame.transform.scale(surf, (SCREEN_WIDTH, SCREEN_HEIGHT))
             screen.blit(surf, (0, 0))
 
-            # Draw the optional instruction over the video
             if instr_s is not None:
                 screen.blit(shadow, shadow_rect)
                 screen.blit(instr_s, instr_rect)
 
             pygame.display.flip()
             frame_index += 1
-
-            # Small cap to keep CPU usage reasonable without harming sync.
             time.sleep(min(frame_interval * 0.3, 0.005))
+
+        return "finished"
     finally:
-        try:
-            clip.close()
-        except Exception:
-            pass
         try:
             if pygame.mixer.get_init():
                 pygame.mixer.music.stop()
@@ -353,6 +336,18 @@ def play_video_in_pygame(path: str) -> None:
                 os.remove(audio_temp)
             except Exception:
                 pass
+
+
+def play_video_in_pygame(path: str, allow_skip: bool | None = None) -> str:
+    """Wrapper that builds a VideoFileClip from `path` and plays it via clip player."""
+    clip = VideoFileClip(path)
+    try:
+        return play_clip_in_pygame(clip, allow_skip=allow_skip)
+    finally:
+        try:
+            clip.close()
+        except Exception:
+            pass
 
 
 def play_video() -> None:
@@ -399,14 +394,37 @@ def play_video() -> None:
             print("No intro videos available after fetch attempt. See README.md for manual instructions.")
             return
 
-    # Use the first available intro video file for in-window playback.
-    video_path = existing_paths[0]
-
+    # Play all existing intro video files in order and loop them (gapless)
     try:
-        print(f"Attempting in-window playback: {video_path}")
+        print(f"Attempting in-window playback for sequence: {existing_paths}")
         sys.stdout.flush()
-        play_video_in_pygame(video_path)
-        return
+        if len(existing_paths) > 1:
+            # Build MoviePy clips and concatenate to avoid gaps.
+            clips = [VideoFileClip(p) for p in existing_paths]
+            try:
+                combined = concatenate_videoclips(clips)
+                try:
+                    while True:
+                        status = play_clip_in_pygame(combined, allow_skip=True)
+                        if status in ("skipped", "quit"):
+                            return
+                finally:
+                    try:
+                        combined.close()
+                    except Exception:
+                        pass
+            finally:
+                for c in clips:
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+        else:
+            # Single-file path: loop the same file until skipped
+            while True:
+                status = play_video_in_pygame(existing_paths[0], allow_skip=True)
+                if status in ("skipped", "quit"):
+                    return
     except Exception as e:
         print("In-window playback failed:", e)
 
