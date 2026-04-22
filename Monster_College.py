@@ -10,6 +10,25 @@ import importlib
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
 
+# Resilient image loader: prefer pygame, fall back to Pillow for PNG/etc.
+def _load_image(path: str, alpha: bool = False) -> pygame.Surface:
+    try:
+        surf = pygame.image.load(path)
+        return surf.convert_alpha() if alpha else surf.convert()
+    except Exception:
+        try:
+            from PIL import Image
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load image {path}: pygame couldn't load it and Pillow is not installed. "
+                "Install Pillow (`pip install pillow`) or convert images to BMP.") from e
+        img = Image.open(path).convert("RGBA" if alpha else "RGB")
+        mode = "RGBA" if alpha else "RGB"
+        data = img.tobytes()
+        surf = pygame.image.frombuffer(data, img.size, mode)
+        return surf.convert_alpha() if alpha else surf.convert()
+
+
 def _resolve_concatenate_videoclips():
     """Support both MoviePy 2.x (top-level) and 1.x (moviepy.editor)."""
     moviepy_pkg = importlib.import_module("moviepy")
@@ -38,7 +57,7 @@ BG_PATH = os.path.join(ASSET_DIR, "cloud.png")
 if not os.path.exists(BG_PATH):
     raise FileNotFoundError(f"Missing background image: {BG_PATH}. Put cloud.png in the menu&map folder.")
 
-_bg_raw = pygame.image.load(BG_PATH).convert()
+_bg_raw = _load_image(BG_PATH, alpha=False)
 _bg_w, _bg_h = _bg_raw.get_size()
 
 # Scale background to fill the screen while preserving aspect ratio
@@ -66,8 +85,8 @@ for _p in (LOGO_PATH, START_BTN_PATH):
     if not os.path.exists(_p):
         raise FileNotFoundError(f"Missing menu asset: {_p}.")
 
-_logo_raw = pygame.image.load(LOGO_PATH).convert_alpha()
-_start_raw = pygame.image.load(START_BTN_PATH).convert_alpha()
+_logo_raw = _load_image(LOGO_PATH, alpha=True)
+_start_raw = _load_image(START_BTN_PATH, alpha=True)
 
 # Scale logo + buttons relative to screen height
 # Make the logo larger and the buttons larger as requested
