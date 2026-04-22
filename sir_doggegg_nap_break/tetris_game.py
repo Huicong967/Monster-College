@@ -2,6 +2,7 @@ import os
 import random
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 
 import pygame
@@ -285,6 +286,11 @@ class Tetris:
             self.score += [0, 100, 300, 500, 800][cleared] * self.level
             self.level = 1 + self.lines // 2
             self.drop_ms = self.compute_drop_ms()
+            # Enter end-state immediately on win so B/T/R keys work on the overlay.
+            if self.lines >= self.mode_win_lines:
+                self.has_won = True
+                self.game_over = True
+                return
         self.spawn_piece()
 
     def hold_current(self):
@@ -443,6 +449,21 @@ class Tetris:
         last_surface = None
         try:
             clip = VideoFileClip(path)
+            fps = clip.fps if clip.fps and clip.fps > 0 else 24
+            frame_interval = 1.0 / float(fps)
+
+            fallback_start_time = time.perf_counter()
+
+            def _playback_time_s():
+                if self.audio_enabled and pygame.mixer.get_init() is not None:
+                    try:
+                        pos_ms = pygame.mixer.music.get_pos()
+                        if pos_ms >= 0:
+                            return pos_ms / 1000.0
+                    except Exception:
+                        pass
+                return max(0.0, time.perf_counter() - fallback_start_time)
+
             if clip.audio is not None and self.audio_enabled:
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                     audio_temp_path = tmp.name
@@ -456,7 +477,9 @@ class Tetris:
                 pygame.mixer.music.load(audio_temp_path)
                 pygame.mixer.music.set_volume(1.0)
                 pygame.mixer.music.play()
-            fps = clip.fps if clip.fps and clip.fps > 0 else 24
+                fallback_start_time = time.perf_counter()
+
+            frame_index = 0
             for frame in clip.iter_frames(fps=fps, dtype="uint8"):
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
@@ -468,17 +491,28 @@ class Tetris:
                     if event.type == pygame.KEYDOWN and event.key == pygame.K_TAB:
                         return last_surface
 
+                playback_time = _playback_time_s()
+                expected_index = int(playback_time * fps)
+                if frame_index < expected_index - 1:
+                    frame_index += 1
+                    continue
+                while frame_index > expected_index + 1:
+                    time.sleep(0.001)
+                    playback_time = _playback_time_s()
+                    expected_index = int(playback_time * fps)
+
                 frame_surface = pygame.image.frombuffer(
                     frame.tobytes(), (frame.shape[1], frame.shape[0]), "RGB"
                 )
-                frame_surface = pygame.transform.smoothscale(frame_surface, (WINDOW_W, WINDOW_H))
+                frame_surface = pygame.transform.scale(frame_surface, (WINDOW_W, WINDOW_H))
                 last_surface = frame_surface.copy()
 
                 self.screen.blit(frame_surface, (0, 0))
                 skip_hint = self.font.render("Press TAB to skip", True, (255, 255, 255))
                 self.screen.blit(skip_hint, (30, WINDOW_H - 44))
                 pygame.display.flip()
-                self.clock.tick(int(max(1, min(60, fps))))
+                frame_index += 1
+                time.sleep(min(frame_interval * 0.3, 0.005))
         except Exception as e:
             print(f"Warning: Could not play intro video: {e}")
         finally:

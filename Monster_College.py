@@ -5,6 +5,7 @@ import sys
 import importlib.util
 import numpy as np
 import tempfile
+import time
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
 
@@ -34,10 +35,18 @@ _bg = pygame.transform.smoothscale(_bg_raw, (int(_bg_w * scale), int(_bg_h * sca
 LOGO_PATH = os.path.join(ASSET_DIR, "logo.png")
 START_BTN_PATH = os.path.join(ASSET_DIR, "start_button.png")
 
-VIDEO_PATH = os.path.join(ASSET_DIR, "skytoschool.mp4")
+INTRO_VIDEO_CANDIDATES = (
+    os.path.join(ASSET_DIR, "skytoschool.mp4"),
+    os.path.join(ASSET_DIR, "monstercollegeintro.mp4"),
+    os.path.join(ASSET_DIR, "intro_video", "intro01.mp4"),
+)
 
-if not os.path.exists(VIDEO_PATH):
-    raise FileNotFoundError(f"Missing video file: {VIDEO_PATH}. Put skytoschool.mp4 in the menu&map folder.")
+
+def resolve_intro_video_path() -> str | None:
+    for candidate in INTRO_VIDEO_CANDIDATES:
+        if os.path.exists(candidate):
+            return candidate
+    return None
 
 for _p in (LOGO_PATH, START_BTN_PATH):
     if not os.path.exists(_p):
@@ -159,15 +168,19 @@ def play_video_in_pygame(path: str) -> None:
     """Play the given video file inside the existing Pygame `screen`.
 
     This uses MoviePy to decode frames and blits them into the Pygame surface.
-    Audio is ignored to keep implementation simple and reliable across platforms.
+    Playback uses wall-clock timing and frame catch-up to keep A/V in sync.
     """
     clip = VideoFileClip(path)
     fps = clip.fps if clip.fps and clip.fps > 0 else 30
-    clock = pygame.time.Clock()
+    frame_interval = 1.0 / float(fps)
 
     # Prepare optional on-screen instruction (styled like the start screen)
     font = pygame.font.Font(None, 48)
-    skip_allowed = os.path.basename(path).lower() == "skytoschool.mp4"
+    skip_allowed = os.path.basename(path).lower() in {
+        "skytoschool.mp4",
+        "monstercollegeintro.mp4",
+        "intro01.mp4",
+    }
     instr_s = None
     shadow = None
     instr_rect = None
@@ -181,14 +194,29 @@ def play_video_in_pygame(path: str) -> None:
         shadow_rect.move_ip(2, 2)
 
     audio_temp = None
+    fallback_start_time = None
+
+    def _playback_time_s() -> float:
+        """Return current playback time using audio clock when available."""
+        if pygame.mixer.get_init():
+            try:
+                pos_ms = pygame.mixer.music.get_pos()
+                if pos_ms >= 0:
+                    return pos_ms / 1000.0
+            except Exception:
+                pass
+        if fallback_start_time is None:
+            return 0.0
+        return max(0.0, time.perf_counter() - fallback_start_time)
     try:
         # extract and play audio if present
         try:
             if hasattr(clip, "audio") and clip.audio is not None:
-                tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                # Use WAV to avoid MP3 encoder delay and improve A/V sync.
+                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
                 tmp_name = tmp.name
                 tmp.close()
-                clip.audio.write_audiofile(tmp_name, logger=None)
+                clip.audio.write_audiofile(tmp_name, codec="pcm_s16le", logger=None)
                 audio_temp = tmp_name
                 try:
                     if not pygame.mixer.get_init():
@@ -200,6 +228,9 @@ def play_video_in_pygame(path: str) -> None:
         except Exception as e:
             print("Warning: failed to extract/play audio:", e)
 
+        fallback_start_time = time.perf_counter()
+
+        frame_index = 0
         for frame in clip.iter_frames(fps=fps, dtype="uint8"):
             # handle quit / escape / tab events while playing
             for event in pygame.event.get():
@@ -244,12 +275,24 @@ def play_video_in_pygame(path: str) -> None:
                                 pass
                         return
 
+            # Sync using audio clock: drop late frames, wait if video gets ahead.
+            playback_time = _playback_time_s()
+            expected_index = int(playback_time * fps)
+            if frame_index < expected_index - 1:
+                frame_index += 1
+                continue
+            while frame_index > expected_index + 1:
+                time.sleep(0.001)
+                playback_time = _playback_time_s()
+                expected_index = int(playback_time * fps)
+
             # frame is HxWx3 RGB
             h, w = frame.shape[0], frame.shape[1]
             # create a surface from the frame bytes
             surf = pygame.image.frombuffer(frame.tobytes(), (w, h), "RGB")
-            # scale to fullscreen while preserving aspect
-            surf = pygame.transform.smoothscale(surf, (SCREEN_WIDTH, SCREEN_HEIGHT))
+            # Use faster scaling during video playback to reduce CPU pressure and A/V drift.
+            if w != SCREEN_WIDTH or h != SCREEN_HEIGHT:
+                surf = pygame.transform.scale(surf, (SCREEN_WIDTH, SCREEN_HEIGHT))
             screen.blit(surf, (0, 0))
 
             # Draw the optional instruction over the video
@@ -258,7 +301,10 @@ def play_video_in_pygame(path: str) -> None:
                 screen.blit(instr_s, instr_rect)
 
             pygame.display.flip()
-            clock.tick(fps)
+            frame_index += 1
+
+            # Small cap to keep CPU usage reasonable without harming sync.
+            time.sleep(min(frame_interval * 0.3, 0.005))
     finally:
         try:
             clip.close()
@@ -278,24 +324,31 @@ def play_video_in_pygame(path: str) -> None:
 
 def play_video() -> None:
     """Try in-window playback first, then fallback to system opener if it fails."""
+    video_path = resolve_intro_video_path()
+    if video_path is None:
+        print("Unable to find an intro video. Tried:")
+        for candidate in INTRO_VIDEO_CANDIDATES:
+            print(f" - {candidate}")
+        return
+
     try:
-        print(f"Attempting in-window playback: {VIDEO_PATH}")
+        print(f"Attempting in-window playback: {video_path}")
         sys.stdout.flush()
-        play_video_in_pygame(VIDEO_PATH)
+        play_video_in_pygame(video_path)
         return
     except Exception as e:
         print("In-window playback failed:", e)
 
     # Fallback: open with system default player
     try:
-        print(f"Falling back to system player for: {VIDEO_PATH}")
+        print(f"Falling back to system player for: {video_path}")
         sys.stdout.flush()
         if sys.platform == "darwin":
-            subprocess.Popen(["open", VIDEO_PATH])
+            subprocess.Popen(["open", video_path])
         elif sys.platform.startswith("win"):
-            os.startfile(VIDEO_PATH)
+            os.startfile(video_path)
         else:
-            subprocess.Popen(["xdg-open", VIDEO_PATH])
+            subprocess.Popen(["xdg-open", video_path])
         return
     except Exception as e:
         print("Fallback open failed:", e)
@@ -362,6 +415,10 @@ def show_map() -> None:
     dog_rect = dog_img.get_rect(center=top_pos) if dog_img is not None else None
 
     pressed_btn = None
+    max_cleared = False
+    tiger_cleared = False
+    locked_hint_until_ms = 0
+    dev_unlock_hint_until_ms = 0
     # Prepare bottom instruction like the start screen
     font = pygame.font.Font(None, 48)
     esc_text = "ESC to close game"
@@ -370,10 +427,13 @@ def show_map() -> None:
     instr_rect = instr_s.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 60))
     shadow_rect = instr_rect.copy()
     shadow_rect.move_ip(2, 2)
+    lock_font = pygame.font.Font(None, 36)
 
     while showing:
         launch_mini_game = False
         launch_tiger_game = False
+        launch_dog_game = False
+        dog_unlocked = max_cleared and tiger_cleared
 
         mx, my = pygame.mouse.get_pos()
         hovered_robot = robot_rect.collidepoint((mx, my)) if robot_rect is not None else False
@@ -391,6 +451,11 @@ def show_map() -> None:
                 if event.key == pygame.K_BACKSPACE:
                     # Return to main menu loop
                     showing = False
+                if event.key == pygame.K_2:
+                    # Dev shortcut: force unlock Doggegg by marking both prerequisites as cleared.
+                    max_cleared = True
+                    tiger_cleared = True
+                    dev_unlock_hint_until_ms = pygame.time.get_ticks() + 1800
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if hovered_robot:
                     pressed_btn = "robot"
@@ -408,7 +473,10 @@ def show_map() -> None:
                     # Launch Tiger Game with the same embedded-jump behavior as Max Mini Game.
                     launch_tiger_game = True
                 elif pressed_btn == "dog" and hovered_dog:
-                    print("Dog egg button clicked")
+                    if dog_unlocked:
+                        launch_dog_game = True
+                    else:
+                        locked_hint_until_ms = pygame.time.get_ticks() + 2000
                 pressed_btn = None
 
         # Draw map
@@ -424,6 +492,35 @@ def show_map() -> None:
         _draw_btn(robot_img, robot_img_hov, robot_rect, hovered_robot, pressed_btn == "robot")
         _draw_btn(tiger_img, tiger_img_hov, tiger_rect, hovered_tiger, pressed_btn == "tiger")
         _draw_btn(dog_img, dog_img_hov, dog_rect, hovered_dog, pressed_btn == "dog")
+
+        if not dog_unlocked and dog_rect is not None:
+            # Dim the Doggegg icon until both prerequisite mini-games are cleared.
+            lock_mask = pygame.Surface((dog_rect.width, dog_rect.height), pygame.SRCALPHA)
+            lock_mask.fill((0, 0, 0, 120))
+            screen.blit(lock_mask, dog_rect.topleft)
+
+        now_ms = pygame.time.get_ticks()
+        if not dog_unlocked or now_ms < locked_hint_until_ms:
+            max_state = "OK" if max_cleared else "Pending"
+            tiger_state = "OK" if tiger_cleared else "Pending"
+            lock_text = f"Unlock Doggegg: clear Max ({max_state}) and Tiger ({tiger_state})"
+            lock_s = lock_font.render(lock_text, True, (255, 255, 255))
+            lock_shadow = lock_font.render(lock_text, True, (0, 0, 0))
+            lock_rect = lock_s.get_rect(center=(SCREEN_WIDTH // 2, 44))
+            lock_shadow_rect = lock_rect.copy()
+            lock_shadow_rect.move_ip(2, 2)
+            screen.blit(lock_shadow, lock_shadow_rect)
+            screen.blit(lock_s, lock_rect)
+
+        if now_ms < dev_unlock_hint_until_ms:
+            dev_text = "Dev: forced unlock enabled (key 2)"
+            dev_s = lock_font.render(dev_text, True, (255, 235, 120))
+            dev_shadow = lock_font.render(dev_text, True, (0, 0, 0))
+            dev_rect = dev_s.get_rect(center=(SCREEN_WIDTH // 2, 80))
+            dev_shadow_rect = dev_rect.copy()
+            dev_shadow_rect.move_ip(2, 2)
+            screen.blit(dev_shadow, dev_shadow_rect)
+            screen.blit(dev_s, dev_rect)
 
         # Draw bottom instruction
         screen.blit(shadow, shadow_rect)
@@ -444,13 +541,17 @@ def show_map() -> None:
                     raise RuntimeError("Unable to load Max Mini Game module")
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
+                result = None
 
                 if hasattr(mod, "run"):
-                    mod.run(screen)
+                    result = mod.run(screen)
                 elif hasattr(mod, "main"):
-                    mod.main()
+                    result = mod.main()
                 else:
                     raise RuntimeError("Max Mini Game does not define run() or main()")
+
+                if bool(result):
+                    max_cleared = True
 
                 # Clear any queued events from the mini game so the map doesn't instantly react.
                 try:
@@ -473,13 +574,17 @@ def show_map() -> None:
                     raise RuntimeError("Unable to load Tiger Game module")
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
+                result = None
 
                 if hasattr(mod, "run"):
-                    mod.run(screen)
+                    result = mod.run(screen)
                 elif hasattr(mod, "main"):
-                    mod.main(screen)
+                    result = mod.main(screen)
                 else:
                     raise RuntimeError("Tiger Game does not define run() or main()")
+
+                if bool(result):
+                    tiger_cleared = True
 
                 # Clear any queued events from the tiger game so the map doesn't instantly react.
                 try:
@@ -488,6 +593,35 @@ def show_map() -> None:
                     pass
             except Exception as e:
                 print("Failed to run Tiger Game:", e)
+
+        if launch_dog_game:
+            dog_path = os.path.join(os.path.dirname(__file__), "sir_doggegg_nap_break", "tetris_game.py")
+            if not os.path.exists(dog_path):
+                print("Sir Doggegg game script not found at", dog_path)
+                continue
+
+            # Run Sir Doggegg game inside the same Pygame window (no subprocess).
+            try:
+                spec = importlib.util.spec_from_file_location("doggegg_game", dog_path)
+                if spec is None or spec.loader is None:
+                    raise RuntimeError("Unable to load Sir Doggegg module")
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+
+                if hasattr(mod, "run"):
+                    mod.run(screen)
+                elif hasattr(mod, "main"):
+                    mod.main(screen)
+                else:
+                    raise RuntimeError("Sir Doggegg game does not define run() or main()")
+
+                # Clear any queued events so the map doesn't instantly react.
+                try:
+                    pygame.event.clear()
+                except Exception:
+                    pass
+            except Exception as e:
+                print("Failed to run Sir Doggegg Game:", e)
 
 
 if __name__ == "__main__":

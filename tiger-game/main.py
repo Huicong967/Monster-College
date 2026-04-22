@@ -2,6 +2,7 @@
 import sys
 import random
 import math
+import time
 import pygame
 import importlib
 import tempfile
@@ -370,7 +371,8 @@ def play_video_fullscreen(screen, clock, video_path, hold_last_frame=True):
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not fps or fps <= 1:
         fps = 30.0
-    frame_delay = max(1, int(1000 / fps))
+    fps = float(fps)
+    frame_interval = 1.0 / fps
     scr_w, scr_h = screen.get_size()
     last_frame_surf = None
     last_pos = (0, 0)
@@ -379,7 +381,17 @@ def play_video_fullscreen(screen, clock, video_path, hold_last_frame=True):
 
     # cv2 only decodes video frames. Use moviepy + pygame mixer channel to play embedded audio.
     temp_audio_path = None
-    video_audio_channel = None
+    fallback_start_time = time.perf_counter()
+
+    def _playback_time_s():
+        if pygame.mixer.get_init() is not None:
+            try:
+                pos_ms = pygame.mixer.music.get_pos()
+                if pos_ms >= 0:
+                    return pos_ms / 1000.0
+            except Exception:
+                pass
+        return max(0.0, time.perf_counter() - fallback_start_time)
     try:
         if VideoFileClip is not None and ensure_mixer_ready():
             clip = VideoFileClip(video_path)
@@ -388,15 +400,15 @@ def play_video_fullscreen(screen, clock, video_path, hold_last_frame=True):
                 temp_audio_path = audio_temp.name
                 audio_temp.close()
                 clip.audio.write_audiofile(temp_audio_path, codec='pcm_s16le', fps=44100, logger=None)
-                video_audio_sound = pygame.mixer.Sound(temp_audio_path)
-                video_audio_channel = pygame.mixer.find_channel(force=True)
-                if video_audio_channel is not None:
-                    video_audio_channel.play(video_audio_sound)
+                pygame.mixer.music.load(temp_audio_path)
+                pygame.mixer.music.play()
+                fallback_start_time = time.perf_counter()
             clip.close()
     except Exception as e:
         print('MenuLog: failed to play video audio track:', e)
 
     playing = True
+    frame_index = 0
     while playing:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -415,9 +427,24 @@ def play_video_fullscreen(screen, clock, video_path, hold_last_frame=True):
                     playing = False
                     break
 
+        playback_time = _playback_time_s()
+        expected_index = int(playback_time * fps)
+        while frame_index < expected_index - 1:
+            if not cap.grab():
+                playing = False
+                break
+            frame_index += 1
+        if not playing:
+            break
+        while frame_index > expected_index + 1:
+            time.sleep(0.001)
+            playback_time = _playback_time_s()
+            expected_index = int(playback_time * fps)
+
         ok, frame = cap.read()
         if not ok:
             break
+        frame_index += 1
 
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         fh, fw = frame.shape[:2]
@@ -438,14 +465,13 @@ def play_video_fullscreen(screen, clock, video_path, hold_last_frame=True):
         screen.blit(skip_shadow, (18, 18))
         screen.blit(skip_surf, (16, 16))
         pygame.display.flip()
-        clock.tick(max(1, int(1000 / frame_delay)))
+        time.sleep(min(frame_interval * 0.3, 0.005))
 
     cap.release()
-    if video_audio_channel is not None:
-        try:
-            video_audio_channel.stop()
-        except Exception:
-            pass
+    try:
+        pygame.mixer.music.stop()
+    except Exception:
+        pass
     if temp_audio_path and os.path.exists(temp_audio_path):
         try:
             os.remove(temp_audio_path)
@@ -942,7 +968,7 @@ def main(screen: pygame.Surface | None = None):
                 if created_display:
                     running = False
                 else:
-                    return
+                    return won
             elif event.type == SPAWN_EVENT:
                 # spawn a ball at random y and x beyond right edge
                 if ball_imgs:
@@ -956,7 +982,7 @@ def main(screen: pygame.Surface | None = None):
                     if created_display:
                         running = False
                     else:
-                        return
+                        return won
                 if event.key == pygame.K_UP:
                     move_up = True
                 elif event.key == pygame.K_w:
@@ -1001,7 +1027,7 @@ def main(screen: pygame.Surface | None = None):
                     elif menu_rect and menu_rect.collidepoint(event.pos):
                         print('MenuLog: Menu clicked.')
                         # Match Max Mini Game home behavior: return to caller menu immediately.
-                        return
+                        return won
                     elif continue_rect and continue_rect.collidepoint(event.pos):
                         print('MenuLog: Continue clicked, play intro video.')
                         flow_action = run_tiger_story_flow(
@@ -1022,13 +1048,13 @@ def main(screen: pygame.Surface | None = None):
                         )
                         if flow_action != 'retry':
                             print('MenuLog: Menu clicked.')
-                            return
+                            return won
                     elif quit_rect and quit_rect.collidepoint(event.pos):
                         print('MenuLog: Quit clicked, closing game.')
                         if created_display:
                             running = False
                         else:
-                            return
+                            return won
 
         if show_start_screen:
             if bg_img:
@@ -1276,6 +1302,7 @@ def main(screen: pygame.Surface | None = None):
 
     if created_display:
         pygame.quit()
+    return won
 
 
 def run(screen: pygame.Surface | None = None):

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Literal
 
 import pygame
@@ -81,8 +82,6 @@ def _play_video(screen: pygame.Surface, video_path: Path, fps_fallback: int) -> 
     if not video_path.exists():
         raise FileNotFoundError(f"Missing video: {video_path}")
 
-    clock = pygame.time.Clock()
-
     clip = VideoFileClip(str(video_path))
 
     screen_w, screen_h = screen.get_size()
@@ -126,7 +125,6 @@ def _play_video(screen: pygame.Surface, video_path: Path, fps_fallback: int) -> 
 
     # --- Video loop ---
     # Render frame based on elapsed time for better A/V sync.
-    start_ms = pygame.time.get_ticks()
     duration = float(getattr(clip, "duration", 0.0) or 0.0)
     if duration <= 0:
         duration = 10_000.0  # effectively "until quit" for malformed clips
@@ -138,6 +136,18 @@ def _play_video(screen: pygame.Surface, video_path: Path, fps_fallback: int) -> 
 
     last_frame_surf: pygame.Surface | None = None
     last_frame_rect: pygame.Rect | None = frame_rect
+
+    fallback_start_time = time.perf_counter()
+
+    def _playback_time_s() -> float:
+        if pygame.mixer.get_init() is not None:
+            try:
+                pos_ms = pygame.mixer.music.get_pos()
+                if pos_ms >= 0:
+                    return pos_ms / 1000.0
+            except Exception:
+                pass
+        return max(0.0, time.perf_counter() - fallback_start_time)
 
     try:
         while True:
@@ -155,20 +165,20 @@ def _play_video(screen: pygame.Surface, video_path: Path, fps_fallback: int) -> 
                         pass
                     return PlayVideoResult(False, last_frame_surf, last_frame_rect)
 
-            t = (pygame.time.get_ticks() - start_ms) / 1000.0
+            t = _playback_time_s()
             if t >= duration:
                 break
 
             frame = clip.get_frame(t)
             h, w = int(frame.shape[0]), int(frame.shape[1])
             surf = pygame.image.frombuffer(frame.tobytes(), (w, h), "RGB").convert()
-            surf = pygame.transform.smoothscale(surf, (frame_rect.width, frame_rect.height))
+            surf = pygame.transform.scale(surf, (frame_rect.width, frame_rect.height))
             last_frame_surf = surf
 
             screen.fill((0, 0, 0))
             screen.blit(surf, frame_rect)
             pygame.display.flip()
-            clock.tick(target_fps)
+            time.sleep(min(1.0 / target_fps, 0.005))
 
         return PlayVideoResult(True, last_frame_surf, last_frame_rect)
     finally:
