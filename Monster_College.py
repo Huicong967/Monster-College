@@ -404,10 +404,9 @@ def play_video() -> None:
             try:
                 combined = concatenate_videoclips(clips)
                 try:
-                    while True:
-                        status = play_clip_in_pygame(combined, allow_skip=True)
-                        if status in ("skipped", "quit"):
-                            return
+                    status = play_clip_in_pygame(combined, allow_skip=True)
+                    if status in ("skipped", "quit", "finished"):
+                        return
                 finally:
                     try:
                         combined.close()
@@ -420,11 +419,10 @@ def play_video() -> None:
                     except Exception:
                         pass
         else:
-            # Single-file path: loop the same file until skipped
-            while True:
-                status = play_video_in_pygame(existing_paths[0], allow_skip=True)
-                if status in ("skipped", "quit"):
-                    return
+            # Single-file path: play once (TAB still skips)
+            status = play_video_in_pygame(existing_paths[0], allow_skip=True)
+            if status in ("skipped", "quit", "finished"):
+                return
     except Exception as e:
         print("In-window playback failed:", e)
 

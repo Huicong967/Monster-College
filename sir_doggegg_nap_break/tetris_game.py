@@ -166,6 +166,8 @@ class Tetris:
         globals()["BOARD_X"] = new_board_x
         globals()["BOARD_Y"] = new_board_y
         self.clock = pygame.time.Clock()
+        # Prevent replaying the intro multiple times for the same game instance
+        self.intro_played = False
         # load background image and scale it to screen size
         try:
             bg_img = pygame.image.load(BG_IMAGE_PATH)
@@ -757,8 +759,13 @@ class Tetris:
         self.restart()
 
     def show_start_sequence(self):
-        intro_path = next((p for p in INTRO_VIDEO_CANDIDATES if os.path.exists(p)), None)
-        last_frame = self.play_intro_video(intro_path) if intro_path else None
+        # Ensure the intro only plays once per Tetris instance.
+        if getattr(self, "intro_played", False):
+            last_frame = None
+        else:
+            intro_path = next((p for p in INTRO_VIDEO_CANDIDATES if os.path.exists(p)), None)
+            last_frame = self.play_intro_video(intro_path) if intro_path else None
+            self.intro_played = True
         self.show_intro_rules_card(last_frame)
         selected_mode = self.show_mode_select()
         self.apply_mode_settings(selected_mode)
